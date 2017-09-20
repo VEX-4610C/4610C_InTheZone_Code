@@ -249,6 +249,15 @@ void pre_auton()
 {
 	bStopTasksBetweenModes = true;
 }
+void releaseClawIfLiftDone()
+{
+	if(liftDone)
+	{
+		clawDone = 0;
+		clawGoal = clawOpen;
+	}
+	wait1Msec(20);
+}
 void basicAuto()
 {
 	startTask(driveWatchdog);
@@ -272,25 +281,20 @@ void basicAuto()
 	elevatorGoal = elevatorTop;
 	while(!elevatorDone) wait1Msec(20);
 
+	/* Make Simultanous Drive and Lift*/
 	liftDone = 0;
 	liftGoal = liftStackBase + liftPosMultiplier * 0;
-	while(!liftDone) wait1Msec(20);
-
-	clawDone = 0;
-	clawGoal = clawOpen;
-	while(!clawDone) wait1Msec(20);
-
-	liftDone = 0;
-	liftGoal = liftBottom;
 
 	driveDone = 0;
 	driveTurnGoal += 10;
-	while(!driveDone) wait1Msec(20);
+	while(!driveDone) releaseClawIfLiftDone();
 
 	driveDone = 0;
 	driveGoal -= 750;
-	while(!driveDone) wait1Msec(20);
-
+	while(!driveDone) releaseClawIfLiftDone();
+	while(!liftDone) wait1Msec(20);
+	releaseClawIfLiftDone();
+	
 	elevatorDone = 0;
 	elevatorGoal = elevatorBottom;
 	while(!elevatorDone) wait1Msec(20);
