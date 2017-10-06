@@ -1,6 +1,7 @@
 #pragma config(I2C_Usage, I2C1, i2cSensors)
 #pragma config(Sensor, in1,    clawPot,        sensorPotentiometer)
 #pragma config(Sensor, in2,    gyro,           sensorGyro)
+#pragma config(Sensor, in3,    elevatorPot,    sensorPotentiometer)
 #pragma config(Sensor, I2C_1,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
 #pragma config(Sensor, I2C_2,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
 #pragma config(Sensor, I2C_3,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
@@ -8,8 +9,7 @@
 #pragma config(Motor,  port2,           frontLeft,     tmotorVex393_MC29, openLoop, encoderPort, I2C_1)
 #pragma config(Motor,  port3,           frontRight,    tmotorVex393_MC29, openLoop, reversed, encoderPort, I2C_2)
 #pragma config(Motor,  port4,           liftLeft,      tmotorVex393_MC29, openLoop)
-#pragma config(Motor,  port5,           elevatorLeft,  tmotorVex393_MC29, openLoop, encoderPort, I2C_3)
-#pragma config(Motor,  port6,           elevatorRight, tmotorVex393_MC29, openLoop, reversed)
+#pragma config(Motor,  port5,           elevator,      tmotorVex393_MC29, openLoop, encoderPort, I2C_3)
 #pragma config(Motor,  port7,           liftRight,     tmotorVex393_MC29, openLoop, reversed)
 #pragma config(Motor,  port8,           backRight,     tmotorVex393_MC29, openLoop, reversed)
 #pragma config(Motor,  port9,           backLeft,      tmotorVex393_MC29, openLoop)
@@ -100,8 +100,8 @@ void liftChange(int degs) // Lift Up using encoders
 	{
 		while(nMotorEncoder[liftRight] > degs)
 		{
-			motor[elevatorLeft]  = 127;
-			motor[elevatorRight]  = 127;
+			motor[liftLeft]  = 127;
+			motor[liftRight]  = 127;
 		}
 	}
 	else // Lift DOWN
@@ -118,24 +118,21 @@ void liftChange(int degs) // Lift Up using encoders
 }
 void elevatorChange(int degs) // Lift Up using encoders
 {
-	if(degs < nMotorEncoder[elevatorLeft]) // Lift UP
+	if(degs < SensorValue[elevatorPot]) // Lift UP
 	{
-		while(nMotorEncoder[elevatorLeft] > degs)
+		while(SensorValue[elevatorPot] > degs)
 		{
-			motor[elevatorLeft]  = 127;
-			motor[elevatorRight]  = 127;
+			motor[elevator]  = 127;
 		}
 	}
 	else // Lift DOWN
 	{
-		while(nMotorEncoder[elevatorLeft] < abs(degs))
+		while(SensorValue[elevatorPot] < abs(degs))
 		{
-			motor[elevatorRight]  = -127;
-			motor[elevatorLeft]  = -127;
+			motor[elevator]  = -127;
 		}
 	}
-	motor[elevatorRight]  = -15; // Hold Power
-	motor[elevatorLeft]  = -15;
+	motor[elevator]  = 15; // Hold Power
 	return;
 }
 void clawChange(int degs) // Lift Up using encoders
@@ -160,10 +157,13 @@ void clawChange(int degs) // Lift Up using encoders
 // Config Parameters
 int liftStart = 0;
 int liftBottom = 0;
+int liftCloseClaw = 0;
+int liftPreload = 0;
 int liftPosMultiplier = 0;
 int liftStackBase = 0;
 int liftGoal = 0;
 int liftDone = 0;
+int curStacked = 0;
 task liftWatchdog()
 {
 	int oldGoal = liftStart;
@@ -239,24 +239,93 @@ task driveWatchdog()
 		}
 	}
 }
+int stackTrigger = -1;
+int taskStack = 0;
+int stackFromLoader = 0;
+task Stacker()
+{
+	startTask(liftWatchdog);
+	startTask(clawWatchdog);
+	startTask(elevatorWatchdog);
+	int clInnerState = 0;
+	while(true)
+	{
+		if(stackTrigger == 1)
+		{
+			if(clInnerState == 0)
+			{
+				clawGoal = clawClose;
+				// Lift Up
+				liftDone = 0;
+				liftGoal = liftStackBase + liftPosMultiplier * curStacked;
+				// Claw Open
+				clawDone = 0;
+				clInnerState += 1;
+			}
+			else if(clInnerState == 1)
+			{
+				if(liftDone)
+					clInnerState += 1;
+			}
+			else if(clInnerState == 2)
+			{
+				clawDone = 0;
+				clawGoal = clawOpen;
+				clInnerState += 1;
+			}
+			else if(clInnerState == 3)
+			{
+				liftDone = 0;
+				if(clawDone)
+				{
+					liftGoal = liftCloseClaw;
+					clInnerState += 1;
+				}
 
-int curStacked = 0;
-int clState = 0;
-int clInnerState = 0;
+			}
+			else if(clInnerState == 4) // clawClose
+			{
+				if(liftDone)
+				{
+					clawGoal = clawClose;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 5) // liftBottom
+			{
+				if(clawDone)
+				{
+					if(stackFromLoader)
+						liftGoal = liftPreload;
+					else
+						liftGoal = liftBottom;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 6) // clawOPen
+			{
+				if(liftDone)
+				{
+					clawGoal = clawOpen;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 7)
+			{
+				stackTrigger = -1;
+				taskStack = 1;
+				curStacked++;
+				clInnerState = 0;
+			}
+		}
+		wait1Msec(20);
+	}
+}
 int elevatorPos = 0;
 int reverseDrive = 1;
 void pre_auton()
 {
 	bStopTasksBetweenModes = true;
-}
-void releaseClawIfLiftDone()
-{
-	if(liftDone)
-	{
-		clawDone = 0;
-		clawGoal = clawOpen;
-	}
-	wait1Msec(20);
 }
 void basicAuto()
 {
@@ -264,7 +333,8 @@ void basicAuto()
 	startTask(liftWatchdog);
 	startTask(clawWatchdog);
 	startTask(elevatorWatchdog);
-	liftGoal = liftStackBase + liftPosMultiplier * 3;
+	startTask(Stacker);
+
 	driveDone = 0;
 	driveGoal += 300;
 	while(!driveDone) wait1Msec(20);
@@ -282,19 +352,19 @@ void basicAuto()
 	while(!elevatorDone) wait1Msec(20);
 
 	/* Make Simultanous Drive and Lift*/
-	liftDone = 0;
-	liftGoal = liftStackBase + liftPosMultiplier * 0;
+	taskStack = 0;
+	stackTrigger = 1;
 
 	driveDone = 0;
 	driveTurnGoal += 10;
-	while(!driveDone) releaseClawIfLiftDone();
+	while(!driveDone) wait1Msec(20);
 
 	driveDone = 0;
 	driveGoal -= 750;
-	while(!driveDone) releaseClawIfLiftDone();
-	while(!liftDone) wait1Msec(20);
-	releaseClawIfLiftDone();
-	
+	while(!driveDone) wait1Msec(20);
+
+	while(taskStack == 0) wait1Msec(20);
+
 	elevatorDone = 0;
 	elevatorGoal = elevatorBottom;
 	while(!elevatorDone) wait1Msec(20);
@@ -373,12 +443,16 @@ task autonomous()
 		basicAuto();
 	}
 }
+
 task usercontrol()
 {
+	int clState = 0;
+	int clInnerState = 0;
 	// User control code here, inside the loop
 	startTask(liftWatchdog);
 	startTask(clawWatchdog);
 	startTask(elevatorWatchdog);
+	startTask(Stacker);
 	while (true)
 	{
 		// Drive
@@ -396,18 +470,23 @@ task usercontrol()
 		if(clState == 0) // Claw Open, Lift Down
 		{
 			clawGoal = clawOpen;
-			liftGoal = liftBottom;
+			if(stackFromLoader)
+				liftGoal = liftPreload;
+			else
+				liftGoal = liftBottom;
 		}
 		else if(clState == 1) // Claw Closed, Lift Down
 		{
 			clawGoal = clawClose;
-			liftGoal = liftBottom;
+			if(stackFromLoader)
+				liftGoal = liftPreload;
+			else
+				liftGoal = liftBottom;
 		}
 		else if(clState == 2) // Process Cone
 		{
 			if(clInnerState == 0)
 			{
-				clawGoal = clawClose;
 				// Lift Up
 				liftDone = 0;
 				liftGoal = liftStackBase + liftPosMultiplier * curStacked;
@@ -428,10 +507,45 @@ task usercontrol()
 			}
 			else if(clInnerState == 3)
 			{
+				liftDone = 0;
 				if(clawDone)
 				{
-					liftGoal = liftBottom;
+					liftGoal = liftCloseClaw;
+					clInnerState += 1;
 				}
+			}
+			else if(clInnerState == 4) // clawClose
+			{
+				if(liftDone)
+				{
+					clawGoal = clawClose;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 5) // liftBottom
+			{
+				if(clawDone)
+				{
+					if(stackFromLoader)
+						liftGoal = liftPreload;
+					else
+						liftGoal = liftBottom;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 6) // clawOPen
+			{
+				if(liftDone)
+				{
+					clawGoal = clawOpen;
+					clInnerState += 1;
+				}
+			}
+			else if(clInnerState == 7)
+			{
+				clState = 0;
+				clInnerState = 0;
+				curStacked ++;
 			}
 		}
 		if (vexRT[Btn6U])
@@ -445,7 +559,13 @@ task usercontrol()
 		}
 		if (vexRT[Btn6D])
 		{
+			while(vexRT[Btn6D]) wait1Msec(20);
 			curStacked--;
+		}
+		if (vexRT[Btn5D])
+		{
+			while(vexRT[Btn5D]) wait1Msec(20);
+			curStacked++;
 		}
 		// Elevator Toggle
 		if(vexRT[Btn5U])
@@ -456,6 +576,7 @@ task usercontrol()
 		if(elevatorPos == 0)
 		{
 			elevatorGoal = elevatorBottom;
+			curStacked++;
 		}
 		else if (elevatorPos == 1)
 		{
@@ -466,6 +587,11 @@ task usercontrol()
 		{
 			while(vexRT[Btn7D]){}
 			reverseDrive = reverseDrive == 1 ? -1 : 1;
+		}
+		if(vexRT[Btn7D])
+		{
+			while(vexRT[Btn7D]) wait1Msec(20);
+			stackFromLoader = abs(stackFromLoader - 1);
 		}
 	}
 }
