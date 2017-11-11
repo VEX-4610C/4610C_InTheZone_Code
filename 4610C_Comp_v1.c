@@ -1,6 +1,7 @@
 #pragma config(I2C_Usage, I2C1, i2cSensors)
 #pragma config(Sensor, in1,    clawPot,        sensorPotentiometer)
 #pragma config(Sensor, in3,    gyro,           sensorGyro)
+#pragma config(Sensor, dgtl2,  liftLimit,      sensorTouch)
 #pragma config(Sensor, I2C_1,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
 #pragma config(Sensor, I2C_2,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
 #pragma config(Sensor, I2C_3,  ,               sensorQuadEncoderOnI2CPort,    , AutoAssign )
@@ -30,29 +31,24 @@
 
 //Main competition background code...do not modify!
 #include "Vex_Competition_Includes.c"
-
+#define sign(x) (x<0?-1:1)
 #define resetButton vexRT[Btn7R]
-int sign(int x)
-{
-	if(x < 0)
-		return -1;
-	return 1;
-}
-/* float map(float x, float in_min, float in_max, float out_min, float out_max)
-{
-return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-} */
-// Config Parameters
-int liftBottom = 0;
-int liftPreload = 167;
-int liftPosMultiplier = -35;
-int liftStackBase = 569;
+
+// LCD Display Code
+// Some utility strings
+#define LEFT_ARROW  247
+#define RIGHT_ARROW 246
+static  char l_arr_str[4] = { LEFT_ARROW,  LEFT_ARROW,  LEFT_ARROW,  0};
+static  char r_arr_str[4] = { RIGHT_ARROW, RIGHT_ARROW, RIGHT_ARROW, 0};
+
+
+int liftAssistActive = 0;
 int liftGoal = 0;
 int liftDone = 0;
 int curStacked = 0;
-int stackLevels[5] = {700, 675, 565, 560, 545}
+int stackLevels[5] = {600, 700, 800, 825, 850};
 
-int clawOpen = 2300;
+int clawOpen = 2500;
 int clawClose = 2900;
 int clawGoal = 2300;
 int clawDone = 0;
@@ -61,12 +57,13 @@ int elevatorGoal = 0;
 int elevatorTop = 0;
 int elevatorBottom = 750;
 int elevatorDone = 0;
+
 void degmove(int distance)
 {
-	nMotorEncoder[frontLeft] = 0;
+	nMotorEncoder[backRight] = 0;
 	if(distance > 0) // move forward
 	{
-		while(nMotorEncoder[frontLeft] < distance)
+		while(nMotorEncoder[backRight] < distance)
 		{
 			motor[frontLeft] = motor[backLeft] = 127;
 			motor[frontRight] = motor[backRight] = 127;
@@ -79,7 +76,7 @@ void degmove(int distance)
 	}
 	else
 	{
-		while(nMotorEncoder[frontLeft] > distance)
+		while(nMotorEncoder[backRight] > distance)
 		{
 			motor[frontLeft] = motor[backLeft] = -127;
 			motor[frontRight] = motor[backRight] = -127;
@@ -121,11 +118,15 @@ void gyroturn(int degrees)
 		motor[frontRight] = motor[backRight] = 0;
 	}
 }
-float liftKP = 0.3, liftKI = 0, liftKD = 0.2;
+float liftKP = 0.065, liftKI = 0, liftKD = -0.02;
 long liftTotalError;
 int liftLastError, liftLastTime = 1;
 int liftChange(int degs) // Lift Up using encoders
 {
+	if(SensorValue[liftLimit])
+	{
+		nMotorEncoder[liftRight] = 0;
+	}
 	int currentEncoder = nMotorEncoder[liftRight];
 	int error = degs - currentEncoder; // e(t)
 	liftTotalError += error;
@@ -143,41 +144,11 @@ int liftChange(int degs) // Lift Up using encoders
 	motor[liftLeft] = motor[liftRight] = liftKP * error + liftKI * liftTotalError + liftKD * dedt;
 	return degs;
 }
-int elevatorChange(int old, int degs) // Lift Up using encoders
-{
-	if(degs < old) // Lift UP
-	{
-		if(nMotorEncoder[elevator] > degs && !resetButton)
-		{
-			motor[elevator]  = -127;
-			return old;
-		}
-		else
-		{
-			motor[elevator]  = 0;
-			return degs;
-		}
-	}
-	else if(degs > old) // Lift DOWN
-	{
-		if(nMotorEncoder[elevator] < degs && !resetButton)
-		{
-			motor[elevator]  = 127;
-			return old;
-		}
-		else
-		{
-			motor[elevator]  = 0;
-			return degs;
-		}
-	}
-	motor[elevator]  = 0; // Hold Power
-	return old;
-}
+int lastClaw = 0;
 int clawChange(int old, int degs) // Lift Up using encoders
 {
-
-	if(degs == clawOpen) // claw open
+	clearTimer(T3);
+	if(degs == clawOpen && abs(lastClaw - SensorValue[clawPot]) > 10) // claw open
 	{
 		if(SensorValue[clawPot] > degs)
 		{
@@ -189,7 +160,7 @@ int clawChange(int old, int degs) // Lift Up using encoders
 		}
 		return degs;
 	}
-	else if(degs == clawClose) // claw closed
+	else if(degs == clawClose && abs(lastClaw - SensorValue[clawPot]) > 10) // claw closed
 	{
 		if(SensorValue[clawPot] < degs)
 		{
@@ -204,29 +175,83 @@ int clawChange(int old, int degs) // Lift Up using encoders
 	motor[claw]  = 12; // Hold Power
 	return old;
 }
-
-
-int oldlift = 0, oldclaw = 2300, oldelevator = 0; // Start Positions
-void watchdog()
+int lastElevator = 0;
+int activeElevator = 0, stopElevator = 0;
+int elevatorChange(int old, int degs) // Lift Up using encoders
 {
-	oldlift = liftChange(liftGoal);
-	if(abs(nMotorEncoder[liftLeft] - liftGoal) < 30)
-		liftDone = 1;
-
-	oldclaw = clawChange(oldclaw, clawGoal);
-	if(oldclaw == clawGoal)
-		clawDone = 1;
-
-	oldelevator = elevatorChange(oldelevator, elevatorGoal);
-	if(oldelevator == elevatorGoal)
-		elevatorDone = 1;
+	if(degs == elevatorBottom && lastElevator == elevatorTop) // Lift UP
+	{
+		activeElevator = 1;
+		stopElevator = time10[T1] + 75;
+		motor[elevator] = -127;
+	}
+	else if(degs == elevatorBottom && lastElevator == elevatorTop) // Lift DOWN
+	{
+		activeElevator = 1;
+		stopElevator = time10[T1] + 75;
+		motor[elevator] = 127;
+	}
+	else
+	{
+		if((time10[T1] > stopElevator && activeElevator) || !activeElevator)
+		{
+			motor[elevator] = 0;
+			activeElevator = 0;
+			return degs;
+		}
+		else
+		{
+			return old;
+		}
+	}
 }
+int startTimer, endTime;
+task Watchdog()
+{
+	int oldclaw, oldelevator;
+	while(1)
+	{
+		if(liftAssistActive)
+		{
+			liftChange(liftGoal);
+		}
+		if(abs(motor[liftRight]) < 50)
+		{
+			if(startTimer == 0)
+				endTime = time10[T1] + 35;
+			startTimer = 1;
+		}
+		else
+		{
+			startTimer = 0;
+		}
+		if(startTimer && time10[T1] > endTime)
+			liftDone = 1;
+		else
+			liftDone = 0;
 
+		if(bIfiAutonomousMode)
+		{
+			oldclaw = clawChange(oldclaw, clawGoal);
+			if(oldclaw == clawGoal)
+				clawDone = 1;
+			else
+				clawDone = 0;
+
+			oldelevator = elevatorChange(oldelevator, elevatorGoal);
+			if(oldelevator == elevatorGoal)
+				elevatorDone = 1;
+			else
+				elevatorDone = 0;
+		}
+	}
+
+}
 int stackTrigger = 0;
 int taskStack = 0;
-int stackFromLoader = 0;
 task Stacker()
 {
+	startTask(Watchdog);
 	taskStack = taskStack;
 	int clInnerState = 0;
 	int lastTrigger = 0;
@@ -238,7 +263,7 @@ task Stacker()
 			{
 				clInnerState = 0;
 			}
-			if(stackTrigger == 1)
+			if(stackTrigger == 1 && curStacked < 5)
 			{
 				if(clInnerState == 0)
 				{
@@ -251,7 +276,7 @@ task Stacker()
 					if(clawDone)
 					{
 						liftDone = 0;
-						liftGoal = liftStackBase + liftPosMultiplier * curStacked;
+						liftGoal = stackLevels[curStacked];
 						clInnerState ++;
 					}
 				}
@@ -262,6 +287,7 @@ task Stacker()
 						clawDone = 0;
 						clawGoal = clawOpen;
 						clInnerState ++;
+						wait1Msec(500);
 					}
 				}
 				else if(clInnerState == 3)
@@ -269,218 +295,423 @@ task Stacker()
 					if(clawDone)
 					{
 						liftDone = 0;
-						if(stackFromLoader)
-						{
-							liftGoal = liftPreload;
-						}
-						else
-						{
-							liftGoal = liftBottom;
-						}
-						clInnerState ++;
+						liftGoal = 0;
+						clInnerState++;
 					}
 				}
 				else if(clInnerState == 4)
 				{
+					if(nMotorEncoder[liftRight] < stackLevels[curStacked] - 50)
+					{
+						clawDone = 0;
+						clawGoal = clawClose;
+						clInnerState++;
+					}
+				}
+				else if(clInnerState == 5)
+				{
+					clInnerState ++;
+				}
+				else if(clInnerState == 6)
+				{
 					if(liftDone)
 					{
+						clawGoal = clawOpen;
 						stackTrigger = 0;
 						clInnerState = 0;
+						curStacked++;
 					}
 				}
 				lastTrigger = stackTrigger;
 			}
 			wait1Msec(20);
-			watchdog();
 		}
 	}
 }
-int reverseDrive = 1;
+// Little macro to keep code cleaner, masks both disable/ebable and auton/driver
+#define vexCompetitionState (nVexRCReceiveState & (vrDisabled | vrAutonomousMode))
+
+TControllerButtons
+getLcdButtons()
+{
+	TVexReceiverState   competitionState = vexCompetitionState;
+	TControllerButtons  buttons;
+
+	// This function will block until either
+	// 1. A button is pressd on the LCD
+	//    If a button is pressed when the function starts then that button
+	//    must be released before a new button is detected.
+	// 2. Robot competition state changes
+
+	// Wait for all buttons to be released
+	while( nLCDButtons != kButtonNone ) {
+		// check competition state, bail if it changes
+		if( vexCompetitionState != competitionState )
+			return( kButtonNone );
+		wait1Msec(10);
+	}
+
+	// block until an LCD button is pressed
+	do  {
+		// we use a copy of the lcd buttons to avoid their state changing
+		// between the test and returning the status
+		buttons = nLCDButtons;
+
+		// check competition state, bail if it changes
+		if( vexCompetitionState != competitionState )
+			return( kButtonNone );
+
+		wait1Msec(10);
+	} while( buttons == kButtonNone );
+
+	return( buttons );
+}
+
+
+int MyAutonomous = -1;
+
+/*-----------------------------------------------------------------------------*/
+/*  Display autonomous selection                                               */
+/*-----------------------------------------------------------------------------*/
+
+// max number of auton choices
+#define MAX_CHOICE  3
+
+void
+LcdAutonomousSet( int value, bool select = false )
+{
+	// Cleat the lcd
+	clearLCDLine(0);
+	clearLCDLine(1);
+
+	// Display the selection arrows
+	displayLCDString(1,  0, l_arr_str);
+	displayLCDString(1, 13, r_arr_str);
+
+	// Save autonomous mode for later if selected
+	if(select)
+		MyAutonomous = value;
+
+	// If this choice is selected then display ACTIVE
+	if( MyAutonomous == value )
+		displayLCDString(1, 5, "ACTIVE");
+	else
+		displayLCDString(1, 5, "select");
+
+	// Show the autonomous names
+	switch(value) {
+	case    0:
+		displayLCDString(0, 0, "Mobile Only");
+		break;
+	case    1:
+		displayLCDString(0, 0, "Mobile 1 Cone");
+		break;
+	case    2:
+		displayLCDString(0, 0, "Mobile 2 Cone");
+		break;
+	case    3:
+		displayLCDString(0, 0, "Only Parking");
+		break;
+	default:
+		displayLCDString(0, 0, "SCREAM AT ALEX");
+		break;
+	}
+}
+
+void
+LcdAutonomousSelection()
+{
+	TControllerButtons  button;
+	int  choice = 0;
+
+	// Turn on backlight
+	bLCDBacklight = true;
+
+	// diaplay default choice
+	LcdAutonomousSet(0);
+
+	while( bIfiRobotDisabled )
+	{
+		// this function blocks until button is pressed
+		button = getLcdButtons();
+
+		// Display and select the autonomous routine
+		if( ( button == kButtonLeft ) || ( button == kButtonRight ) ) {
+			// previous choice
+			if( button == kButtonLeft )
+				if( --choice < 0 ) choice = MAX_CHOICE;
+			// next choice
+			if( button == kButtonRight )
+				if( ++choice > MAX_CHOICE ) choice = 0;
+			LcdAutonomousSet(choice);
+		}
+
+		// Select this choice
+		if( button == kButtonCenter )
+			LcdAutonomousSet(choice, true );
+
+		// Don't hog the cpu !
+		wait1Msec(10);
+	}
+}
+void setupLift()
+{
+	motor[liftRight] = motor[liftLeft] = 127;
+	while(!SensorValue[liftLimit]) { wait1Msec(20); }
+	nMotorEncoder[liftRight] = 0;
+	motor[liftRight] = motor[liftLeft] = 0;
+}
+void mobileGoalAuto()
+{
+	degmove(-20);
+	setupLift();
+	elevatorGoal = elevatorBottom;
+	degmove(-55);
+	elevatorGoal = elevatorTop;
+	while(!elevatorDone) {wait1Msec(20);}
+	degmove(75);
+	gyroturn(180);
+	elevatorGoal = elevatorBottom;
+	while(!elevatorDone) {wait1Msec(20);}
+	degmove(20);
+
+
+}
+void mobileOneCone()
+{
+	degmove(20);
+	degmove(-10);
+	setupLift();
+	degmove(10);
+	clawGoal = clawClose;
+	while(!clawDone) {wait1Msec(20);}
+	liftGoal = 150;
+	elevatorGoal = elevatorBottom;
+	gyroturn(180);
+	degmove(-55);
+	elevatorGoal = elevatorTop;
+	while(!elevatorDone) {wait1Msec(20);}
+	stackTrigger = 1;
+	degmove(75);
+	gyroturn(180);
+	while(stackTrigger) {wait1Msec(20);}
+	elevatorGoal = elevatorBottom;
+	while(!elevatorDone) {wait1Msec(20);}
+	degmove(20);
+}
+void mobileTwoCone()
+{
+	degmove(20);
+	degmove(-10);
+	setupLift();
+	degmove(10);
+	clawGoal = clawClose;
+	while(!clawDone) {wait1Msec(20);}
+	wait1Msec(200);
+	liftGoal = 150;
+	elevatorGoal = elevatorBottom;
+	gyroturn(180);
+	degmove(-55);
+	elevatorGoal = elevatorTop;
+	while(!elevatorDone) {wait1Msec(20);}
+	stackTrigger = 1;
+	while(stackTrigger) {wait1Msec(20);}
+	degmove(36);
+	gyroturn(135);
+	degmove(10);
+	clawGoal = clawClose;
+	while(!clawDone) {wait1Msec(20);}
+	wait1Msec(200);
+	stackTrigger = 1;
+	gyroturn(-55);
+	degmove(-55);
+	while(stackTrigger) {wait1Msec(20);}
+	elevatorGoal = elevatorBottom;
+	while(!elevatorDone) {wait1Msec(20);}
+	degmove(20);
+}
+void parkAuto()
+{
+	degmove(-10);
+	setupLift();
+	degmove(-65);
+}
+void degMoveTest()
+{
+	degmove(24);
+	degmove(-36);
+	degmove(12);
+}
+void gyroTurnTest()
+{
+	gyroturn(90);
+	gyroturn(-180);
+	gyroturn(90);
+}
+void stackerTest()
+{
+	curStacked = 0;
+	startTask(Stacker);
+	for(int i =0; i<2; i++)
+	{
+		wait1Msec(500);
+		curStacked = i;
+		stackTrigger = 0;
+		clawDone = 0;
+		clawGoal = clawOpen;
+		while(!clawDone) { wait1Msec(20); }
+		clawDone = 0;
+		clawGoal = clawClose;
+		while(!clawDone) { wait1Msec(20); }
+		wait1Msec(2000);
+		stackTrigger = 1;
+		while(stackTrigger) { wait1Msec(20); }
+		wait1Msec(1200);
+	}
+}
+
 void pre_auton()
 {
 	bStopTasksBetweenModes = true;
+	LcdAutonomousSelection();
 }
-void basicAuto()
-{
-	startTask(Stacker);
-}
-int tester = 6;
-		int startTimer = 0;
-		int endTime = 0;
+
+/* Auto Selections
+0 - Only Mobile Goal
+1 - Mobile Goal + 1 Cone
+2 - Mobile Goal + 2 Cone
+3 - Park + Lift Setup
+4 - Degmove Test
+5 - Gyroturn Test
+6 - Stacker Test
+*/
+int OVERRIDE_AUTO      = 0;
+int OVERRIDE_SELECTION = 0;
 task autonomous()
 {
-	liftGoal = 0;
-	clearTimer(T1);
-	/*
-	0 = drive Forward 200 and back 200
-	1 = lift to bottom and back to stack
-	2 = claw open and close
-	3 = elevator up and then down
-	4 = drive turn 90 right 90 left 180 right
-	5 = basic auto
-	6 = pid tester
-	*/
-	if(tester == 0)
-	{
-		degmove(200);
-		wait1Msec(500);
-		degmove(-200);
-	}
-	else if(tester == 1)
-	{
-		liftDone = 0;
-		liftGoal = liftBottom;
-		while(!liftDone)  watchdog();
-		wait1Msec(500);
-		liftDone = 0;
-		liftGoal = liftStackBase + liftPosMultiplier * 0;
-		while(!liftDone)  watchdog();
-	}
-	else if(tester == 2)
-	{
-		clawDone = 0;
-		clawGoal = clawOpen;
-		while(!clawDone) watchdog();
-		wait1Msec(500);
-		clawDone = 0;
-		clawGoal = clawClose;
-		while(!clawDone) watchdog();
-	}
-	else if(tester == 3)
-	{
-		elevatorDone = 0;
-		elevatorGoal = elevatorTop;
-		while(!elevatorDone) watchdog();
-		wait1Msec(500);
-		elevatorDone = 0;
-		elevatorGoal = elevatorBottom;
-		while(!elevatorDone) watchdog();
-	}
-	else if(tester == 4)
-	{
-		gyroturn(90);
-		wait1Msec(500);
-		gyroturn(-90);
-	}
-	else if(tester == 5)
-	{
-		basicAuto();
-	}
-	else if(tester == 6)
-	{
-		clawGoal = clawClose;
-		for(int i = 0; i < 25; i++)
-		{
-			watchdog();
-			wait1Msec(20);
-		}
-		liftGoal = stackLevels[3];
-		nMotorEncoder[liftRight] = 0;
-		while(1)
-		{
-			watchdog();
-			wait1Msec(20);
-			if(abs(motor[liftRight]) < 50)
-			{
-				if(startTimer == 0)
-					endTime = time10[T1] + 50;
-				startTimer = 1;
-			}
-			else
-			{
-				startTimer = 0;
-			}
-			if(startTimer && time10[T1] > endTime)
-				break;
-		}
+	if(      (!OVERRIDE_AUTO && MyAutonomous == 0) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 0))
+		mobileGoalAuto();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 1) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 1))
+		mobileOneCone();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 2) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 2))
+		mobileTwoCone();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 3) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 3))
+		parkAuto();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 4) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 4))
+		degMoveTest();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 5) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 5))
+		gyroTurnTest();
+	else if( (!OVERRIDE_AUTO && MyAutonomous == 6) || (OVERRIDE_AUTO && OVERRIDE_SELECTION == 6))
+		stackerTest();
 
-		clawGoal = clawOpen;
-		while(1)
-			watchdog();
-	}
 }
+
+/*---------------------------------------------------------------------------*/
+/*                                                                           */
+/*                              User Control Task                            */
+/*                                                                           */
+/*  This task is used to control your robot during the user control phase of */
+/*  a VEX Competition.                                                       */
+/*                                                                           */
+/*  You must modify the code to add your own robot specific commands here.   */
+/*---------------------------------------------------------------------------*/
 
 task usercontrol()
 {
 	// User control code here, inside the loop
-	startTask(Stacker);
+	startTask(Watchdog);
 	while (true)
 	{
-		if(resetButton)
+		int reverseDrive = 1;
+		int left, right;
+		left  = abs(vexRT[Ch3]);
+		right  = abs(vexRT[Ch2]);
+		left = (5*left*left + 305*left + 3624)/1000;
+		right = (5*right*right + 305*right + 3624)/1000;
+		motor[frontLeft] = motor[backLeft]   = ((int) left) * reverseDrive * sign(vexRT[Ch3]);
+		motor[frontRight] = motor[backRight] = motor[port2] = ((int) right) * reverseDrive * sign(vexRT[Ch2]);
+		if(vexRT[Btn5U])
 		{
-			stackTrigger = 0;
+			motor[claw] = -127;
 		}
-		if(!resetButton)
+		else if(vexRT[Btn6U])
 		{
-			// Drive
-			int left, right;
-			left  = abs(vexRT[Ch3]);
-			right  = abs(vexRT[Ch2]);
-			left = (5*left*left + 305*left + 3624)/1000;
-			right = (5*right*right + 305*right + 3624)/1000;
-			motor[frontLeft] = motor[backLeft]   = ((int) left) * reverseDrive * sign(vexRT[Ch3]);
-			motor[frontRight] = motor[backRight] = ((int) right) * reverseDrive * sign(vexRT[Ch2]);
+			motor[claw] = 127;
+		}
+		else
+		{
+			if(motor[claw] > 0)
+			{
+				motor[claw ] =12;
+			}
+			else
+			{
+				motor[claw] = 0;
+			}
+		}
+		if(vexRT[Btn7D])
+		{
+			motor[elevator] = -127;
+		}
+		else if(vexRT[Btn8D])
+		{
+			motor[elevator] = 127;
+		}
+		else
+		{
+			motor[elevator] = 0;
+		}
 
-			// Lift-Claw State Machine
-			if(vexRT[Btn5U] && !stackTrigger)
+
+		int liftTimerActive = 0;
+		int liftTimer       = 0;
+		if(vexRT[Btn5D] && vexRT[Btn6D])
+		{
+			liftAssistActive = 1;
+			liftDone = 0;
+			if(nMotorEncoder[liftRight] < 300)
+				liftGoal = 650;
+			else
+				liftGoal = 0;
+			liftTimerActive = 0;
+		}
+		else if(vexRT[Btn6D]) // Up Manual
+		{
+			liftAssistActive = 0;
+			if(liftTimerActive && time1[T4] > liftTimer)
+				motor[liftLeft] = motor[liftRight] = 75;
+
+			if(liftTimerActive == 0)
 			{
-				clawGoal = clawOpen;
-			}
-			else if(vexRT[Btn6U] && !stackTrigger)
-			{
-				clawGoal = clawClose;
-			}
-			if(vexRT[Btn5D]) // Stack Loader
-			{
-				while(vexRT[Btn5D]) { wait1Msec(20); }
-				if(stackFromLoader == 0)
-				{
-					stackFromLoader = 1;
-				}
-				else
-				{
-					stackTrigger = 1;
-				}
-			}
-			else if(vexRT[Btn6D]) // Stack Ground
-			{
-				while(vexRT[Btn6D]) { wait1Msec(20); }
-				if(stackFromLoader == 1)
-				{
-					stackFromLoader = 0;
-				}
-				else
-				{
-					stackTrigger = 1;
-				}
-			}
-			// Manual Lift
-			if(vexRT[Btn7L] && !stackTrigger)
-			{
-				motor[liftLeft] = -127;
-				motor[liftRight] = -127;
-			}
-			else if(vexRT[Btn8R] && !stackTrigger)
-			{
-				motor[liftLeft] = 127;
-				motor[liftRight] = 127;
-			}
-			else if(!stackTrigger)
-			{
-				if(stackFromLoader)
-					liftGoal = liftPreload;
-				else
-					liftGoal = liftBottom;
-			}
-			// Elevator Toggle
-			if(vexRT[Btn7D])
-			{
-				elevatorGoal = elevatorBottom;
-			}
-			else if(vexRT[Btn8D])
-			{
-				elevatorGoal = elevatorTop;
+				liftTimerActive = 1;
+				liftTimer = time1[T4] + 20;
 			}
 		}
+		else if(vexRT[Btn5D]) // Down Manual
+		{
+			liftAssistActive = 0;
+			if(liftTimerActive && time1[T4] > liftTimer)
+				motor[liftLeft] = motor[liftRight] = -75;
+
+			if(liftTimerActive == 0)
+			{
+				liftTimerActive = 1;
+				liftTimer = time1[T4] + 20;
+			}
+		}
+		else
+		{
+			if(liftAssistActive == 0 && liftTimerActive && time1[T4] > liftTimer)
+				motor[liftLeft] = motor[liftRight] = 0;
+
+			if(!liftTimerActive)
+			{
+				liftTimerActive = 1;
+				liftTimer = time1[T4] + 20;
+			}
+		}
+		if(liftDone)
+			liftAssistActive = 0;
+
 	}
 }
